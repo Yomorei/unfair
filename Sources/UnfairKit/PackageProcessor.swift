@@ -71,8 +71,7 @@ public final class PackageProcessor {
         let installedApp = try findInstalledApp(metadata)
         defer { cleanupInstalledApp(installedApp, bundleID: metadata.bundleID) }
 
-        var decryptedRecords: [MachORecord] = []
-        decryptedRecords.append(contentsOf: try processAppBundle(installedApp))
+        let decryptedRecords = try processInstalledAppBundle(installedApp, outputApp: sourceApp)
 
         let destination = destinationPath(input: input, output: output)
         let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
@@ -229,6 +228,49 @@ public final class PackageProcessor {
             return path
         }
         throw UnfairError.io("required executable missing: \(paths.joined(separator: ", "))")
+    }
+    #endif
+
+    #if os(iOS)
+    private func processInstalledAppBundle(_ installedApp: URL, outputApp: URL) throws -> [MachORecord] {
+        let label = installedApp.lastPathComponent
+        logger.log("app: \(label)")
+
+        let installedRecords = try MachOInspector.scanBinaries(appURL: installedApp, label: label)
+        let encryptedInstalledRecords = installedRecords.filter(\.isEncrypted)
+        logScan(installedRecords, encryptedRecords: encryptedInstalledRecords)
+
+        guard let rootSinf = findRootSinf(appURL: installedApp, records: installedRecords) else {
+            throw UnfairError.missingRootSinf
+        }
+
+        let outputRecords = try MachOInspector.scanBinaries(appURL: outputApp, label: label)
+        let outputsByDisplayPath = Dictionary(uniqueKeysWithValues: outputRecords.map { ($0.displayPath, $0) })
+        var decryptedOutputRecords: [MachORecord] = []
+        let decryptor = BinaryDecryptor(logger: logger)
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
+
+        for installedRecord in encryptedInstalledRecords {
+            guard let outputRecord = outputsByDisplayPath[installedRecord.displayPath] else {
+                throw UnfairError.io("output binary missing: \(installedRecord.displayPath)")
+            }
+            let binaryDir = installedRecord.url.deletingLastPathComponent()
+            try validateDecryptableLocation(installedRecord.url, label: "installed binary")
+            try validateDecryptableLocation(outputRecord.url, label: "output binary")
+            logger.verbose("cwd: \(binaryDir.path)")
+            FileManager.default.changeCurrentDirectoryPath(binaryDir.path)
+            try decryptor.decryptBinary(
+                installedAt: URL(fileURLWithPath: installedRecord.name),
+                outputURL: outputRecord.url,
+                rootSinf: rootSinf,
+                displayPath: installedRecord.displayPath
+            )
+            decryptedOutputRecords.append(outputRecord)
+        }
+
+        try verifyDecryptedBinaries(in: outputApp, label: label)
+        return decryptedOutputRecords
     }
     #endif
 

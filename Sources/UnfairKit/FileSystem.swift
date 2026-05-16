@@ -1,13 +1,7 @@
 import Darwin
 import Foundation
-import UnfairSupport
 
 enum FileSystem {
-    struct CommandResult {
-        var status: Int32
-        var output: String
-    }
-
     static func createDirectory(_ url: URL) throws {
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
@@ -46,44 +40,6 @@ enum FileSystem {
 
     static func removeTree(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
-    }
-
-    static func runExecutable(_ executable: String, arguments: [String]) throws -> CommandResult {
-        var cArguments = arguments.map { strdup($0) }
-        defer { cArguments.forEach { free($0) } }
-
-        var status: Int32 = 0
-        var outputPointer: UnsafeMutablePointer<CChar>?
-        var errorPointer: UnsafeMutablePointer<CChar>?
-        let argumentCount = Int32(cArguments.count)
-        let runResult = executable.withCString { executableCString in
-            cArguments.withUnsafeMutableBufferPointer { buffer in
-                unfair_run_executable(
-                    executableCString,
-                    argumentCount,
-                    buffer.baseAddress,
-                    &status,
-                    &outputPointer,
-                    &errorPointer
-                )
-            }
-        }
-        defer {
-            if let outputPointer {
-                unfair_free(outputPointer)
-            }
-            if let errorPointer {
-                unfair_free(errorPointer)
-            }
-        }
-
-        guard runResult == 0 else {
-            let message = errorPointer.map { String(cString: $0) } ?? "command execution failed"
-            throw UnfairError.io(message)
-        }
-
-        let output = outputPointer.map { String(cString: $0) } ?? ""
-        return CommandResult(status: status, output: output)
     }
 
     static func clearExtendedAttributesRecursively(at url: URL) {

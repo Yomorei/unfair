@@ -14,14 +14,14 @@ struct StagedBinary {
 }
 
 enum AppBundleStager {
-    private static let installedAppRoot = URL(fileURLWithPath: "/var/containers/Bundle/Application", isDirectory: true)
+    private static let applicationBundleRoot = URL(fileURLWithPath: "/var/containers/Bundle/Application", isDirectory: true)
 
-    static func isInsideInstalledApplicationRoot(_ url: URL) -> Bool {
+    static func isInsideApplicationBundleRoot(_ url: URL) -> Bool {
         let paths = [
             url.standardizedFileURL.path,
             url.standardizedFileURL.resolvingSymlinksInPath().path,
         ]
-        let root = installedAppRoot.standardizedFileURL.path
+        let root = applicationBundleRoot.standardizedFileURL.path
         return paths.contains { path in
             path == root || path.hasPrefix(root + "/")
         }
@@ -64,7 +64,7 @@ enum AppBundleStager {
     }
 
     private static func createBundle(appName: String, logger: UnfairLogger) throws -> StagedAppBundle {
-        let container = installedAppRoot.appendingPathComponent("UNFAIR-\(UUID().uuidString)", isDirectory: true)
+        let container = applicationBundleRoot.appendingPathComponent("UNFAIR-\(UUID().uuidString)", isDirectory: true)
         let app = container.appendingPathComponent(appName, isDirectory: true)
         try FileSystem.createDirectory(app)
         logger.log("staged app: \(app.path)")

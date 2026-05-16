@@ -55,12 +55,7 @@ public final class PackageProcessor {
         }
 
         try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        let sourceRecords = try MachOInspector.scanBinaries(appURL: sourceApp, label: sourceApp.lastPathComponent)
-        let encryptedRecords = sourceRecords.filter(\.isEncrypted)
-        let stagedApp = try AppBundleStager.stageAppBundle(sourceApp: sourceApp, encryptedRecords: encryptedRecords, logger: logger)
-        defer { AppBundleStager.cleanup(stagedApp) }
-
-        let decryptedRecords = try processStagedAppBundle(stagedApp.appURL, outputApp: sourceApp)
+        let decryptedRecords = try processStagedAppBundle(sourceApp, outputApp: sourceApp)
 
         let destination = destinationPath(input: input, output: output)
         let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")

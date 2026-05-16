@@ -30,6 +30,13 @@ public final class BinaryDecryptor {
     }
 
     public func decryptBinary(at url: URL, rootSinf: URL, displayPath: String? = nil) throws {
+        #if os(iOS)
+        if AppBundleStager.isInsideInstalledApplicationRoot(url) == false {
+            try decryptStagedBinary(at: url, rootSinf: rootSinf, displayPath: displayPath)
+            return
+        }
+        #endif
+
         let temporarySinf = try installTemporarySinf(for: url, rootSinf: rootSinf)
         defer { removeTemporarySinf(temporarySinf) }
         let status = try decryptBinaryInPlace(at: url)
@@ -42,6 +49,25 @@ public final class BinaryDecryptor {
         let status = try decryptBinary(installedAt: installedURL, outputURL: outputURL)
         log(status: status, label: displayPath ?? outputURL.path)
     }
+
+    #if os(iOS)
+    private func decryptStagedBinary(at url: URL, rootSinf: URL, displayPath: String?) throws {
+        let staged = try AppBundleStager.stageBinary(url, rootSinf: rootSinf, logger: logger)
+        defer { AppBundleStager.cleanup(staged.bundle) }
+
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
+
+        logger.verbose("cwd: \(staged.bundle.appURL.path)")
+        FileManager.default.changeCurrentDirectoryPath(staged.bundle.appURL.path)
+        try decryptBinary(
+            installedAt: URL(fileURLWithPath: staged.binaryURL.lastPathComponent),
+            outputURL: url,
+            rootSinf: staged.rootSinf,
+            displayPath: displayPath ?? url.path
+        )
+    }
+    #endif
 
     private func log(status: DecryptionStatus, label: String) {
         switch status {

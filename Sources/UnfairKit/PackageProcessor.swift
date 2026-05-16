@@ -22,7 +22,7 @@ public final class PackageProcessor {
         FileSystem.clearExtendedAttributesRecursively(at: workingDirectory)
 
         #if os(iOS)
-        try processInstalledPackage(input: input, output: output, workingDirectory: workingDirectory, payloadURL: payloadURL)
+        try processStagedPackage(input: input, output: output, workingDirectory: workingDirectory, payloadURL: payloadURL)
         #else
         var decryptedRecords: [MachORecord] = []
         for app in try appBundles(in: payloadURL) {
@@ -57,21 +57,19 @@ public final class PackageProcessor {
         var infoPlist: URL
     }
 
-    private func processInstalledPackage(input: URL, output: URL, workingDirectory: URL, payloadURL: URL) throws {
+    private func processStagedPackage(input: URL, output: URL, workingDirectory: URL, payloadURL: URL) throws {
         let sourceApps = try appBundles(in: payloadURL)
         guard sourceApps.count == 1, let sourceApp = sourceApps.first else {
             throw UnfairError.io("iOS package mode expects one Payload/*.app bundle")
         }
 
-        let metadata = try appBundleMetadata(sourceApp)
         try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        let installInput = try installableIPA(input: input, metadata: metadata, workingDirectory: workingDirectory)
-        try installIPA(installInput, bundleID: metadata.bundleID)
+        let sourceRecords = try MachOInspector.scanBinaries(appURL: sourceApp, label: sourceApp.lastPathComponent)
+        let encryptedRecords = sourceRecords.filter(\.isEncrypted)
+        let stagedApp = try AppBundleStager.stageAppBundle(sourceApp: sourceApp, encryptedRecords: encryptedRecords, logger: logger)
+        defer { AppBundleStager.cleanup(stagedApp) }
 
-        let installedApp = try findInstalledApp(metadata)
-        defer { cleanupInstalledApp(installedApp, bundleID: metadata.bundleID) }
-
-        let decryptedRecords = try processInstalledAppBundle(installedApp, outputApp: sourceApp)
+        let decryptedRecords = try processInstalledAppBundle(stagedApp.appURL, outputApp: sourceApp)
 
         let destination = destinationPath(input: input, output: output)
         let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
@@ -493,14 +491,22 @@ public final class PackageProcessor {
         if components.count > 1, components[1] == "private" {
             components.remove(at: 1)
         }
-        guard components.count > 6 else {
-            return false
+        if components.count > 6,
+           components[0] == "/",
+           components[1] == "var",
+           components[2] == "folders",
+           components[3] == "bg",
+           components[5] == "X" {
+            return true
         }
-        return components[0] == "/"
+        return components.count > 8
+            && components[0] == "/"
             && components[1] == "var"
-            && components[2] == "folders"
-            && components[3] == "bg"
-            && components[5] == "X"
+            && components[2] == "mobile"
+            && components[3] == "Containers"
+            && components[4] == "Data"
+            && components[5] == "Application"
+            && components[7] == "X"
     }
 
     private func isInsideInstalledApplicationRoot(_ path: String) -> Bool {

@@ -33,10 +33,9 @@ function main() {
 
 main
 
-mv .build/release/unfair-swift .
-chmod +x unfair-swift
-ldid -Sglobal.xml unfair-swift
-mv unfair-swift unfair
+mv .build/release/unfair-swift unfair
+chmod +x unfair
+ldid -Sglobal.xml unfair
 
 # if ip is provided, send to the device in one go
 if [ -n "$1" ]; then

@@ -1,8 +1,10 @@
+import Darwin
 import Foundation
 import ZIPFoundation
 
 public final class PackageProcessor {
     private let logger: UnfairLogger
+    private let installedAppRoot = URL(fileURLWithPath: "/var/containers/Bundle/Application", isDirectory: true)
 
     public init(logger: UnfairLogger = UnfairLogger()) {
         self.logger = logger
@@ -19,6 +21,9 @@ public final class PackageProcessor {
         logger.log("payload: payload")
         FileSystem.clearExtendedAttributesRecursively(at: workingDirectory)
 
+        #if os(iOS)
+        try processInstalledPackage(input: input, output: output, workingDirectory: workingDirectory, payloadURL: payloadURL)
+        #else
         var decryptedRecords: [MachORecord] = []
         for app in try appBundles(in: payloadURL) {
             decryptedRecords.append(contentsOf: try processAppBundle(app))
@@ -29,48 +34,112 @@ public final class PackageProcessor {
         try writeArchive(input: input, decryptedRecords: decryptedRecords, to: archiveOutput)
         try copyArchive(archiveOutput, to: destination)
         logger.log("output: \(destination.path)")
+        #endif
     }
 
     private func writeArchive(input: URL, decryptedRecords: [MachORecord], to destination: URL) throws {
-        try FileSystem.createDirectory(destination.deletingLastPathComponent())
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
+        let replacements = decryptedRecords.map { record in
+            ArchiveReplacement(
+                path: "Payload/" + record.displayPath,
+                url: record.url
+            )
         }
-        try FileManager.default.copyItem(at: input, to: destination)
-
-        let archive = try Archive(url: destination, accessMode: .update, pathEncoding: nil)
-        try removeSymlinkEntries(in: archive)
-
-        for record in decryptedRecords {
-            try replaceEntry(for: record, in: archive)
-        }
+        let writer = PackageArchiveWriter(logger: logger)
+        try writer.writeArchive(input: input, replacements: replacements, to: destination)
     }
 
-    private func removeSymlinkEntries(in archive: Archive) throws {
-        let symlinks = archive.filter { $0.type == .symlink }
-        for entry in symlinks {
-            logger.verbose("skipped symlink in output: \(entry.path)")
-            try archive.remove(entry)
-        }
+    #if os(iOS)
+    private struct AppBundleMetadata {
+        var bundleID: String
+        var executable: String
+        var bundleName: String
+        var minimumOSVersion: String?
+        var infoPlist: URL
     }
 
-    private func replaceEntry(for record: MachORecord, in archive: Archive) throws {
-        let path = "Payload/" + record.displayPath
+    private func processInstalledPackage(input: URL, output: URL, workingDirectory: URL, payloadURL: URL) throws {
+        let sourceApps = try appBundles(in: payloadURL)
+        guard sourceApps.count == 1, let sourceApp = sourceApps.first else {
+            throw UnfairError.io("iOS package mode expects one Payload/*.app bundle")
+        }
+
+        let metadata = try appBundleMetadata(sourceApp)
+        try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
+        let installInput = try installableIPA(input: input, metadata: metadata, workingDirectory: workingDirectory)
+        try installIPA(installInput, bundleID: metadata.bundleID)
+
+        let installedApp = try findInstalledApp(metadata)
+        defer { cleanupInstalledApp(installedApp, bundleID: metadata.bundleID) }
+
+        var decryptedRecords: [MachORecord] = []
+        decryptedRecords.append(contentsOf: try processAppBundle(installedApp))
+
+        let destination = destinationPath(input: input, output: output)
+        let archiveOutput = workingDirectory.appendingPathComponent("output.ipa")
+        try writeArchive(input: input, decryptedRecords: decryptedRecords, to: archiveOutput)
+        try copyArchive(archiveOutput, to: destination)
+        logger.log("output: \(destination.path)")
+    }
+
+    private func appBundleMetadata(_ appURL: URL) throws -> AppBundleMetadata {
+        let infoPlist = appURL.appendingPathComponent("Info.plist")
+        guard let info = NSDictionary(contentsOf: infoPlist) as? [String: Any] else {
+            throw UnfairError.io("failed to read Info.plist: \(infoPlist.path)")
+        }
+        guard let bundleID = info["CFBundleIdentifier"] as? String, bundleID.isEmpty == false else {
+            throw UnfairError.io("CFBundleIdentifier missing: \(infoPlist.path)")
+        }
+        guard let executable = info["CFBundleExecutable"] as? String, executable.isEmpty == false else {
+            throw UnfairError.io("CFBundleExecutable missing: \(infoPlist.path)")
+        }
+        return AppBundleMetadata(
+            bundleID: bundleID,
+            executable: executable,
+            bundleName: appURL.lastPathComponent,
+            minimumOSVersion: info["MinimumOSVersion"] as? String,
+            infoPlist: infoPlist
+        )
+    }
+
+    private func installableIPA(input: URL, metadata: AppBundleMetadata, workingDirectory: URL) throws -> URL {
+        let installInput = workingDirectory.appendingPathComponent("install.ipa")
+        try copyArchive(input, to: installInput)
+
+        guard let minimumOSVersion = metadata.minimumOSVersion,
+              minimumOSVersionExceedsCurrentDevice(minimumOSVersion) else {
+            return installInput
+        }
+
+        let patchedMinimumOSVersion = currentDeviceMinimumOSVersion()
+        logger.log("patching MinimumOSVersion for install: \(minimumOSVersion) -> \(patchedMinimumOSVersion)")
+
+        guard let info = NSMutableDictionary(contentsOf: metadata.infoPlist) else {
+            throw UnfairError.io("failed to patch Info.plist: \(metadata.infoPlist.path)")
+        }
+        info["MinimumOSVersion"] = patchedMinimumOSVersion
+        guard info.write(to: metadata.infoPlist, atomically: true) else {
+            throw UnfairError.io("failed to write patched Info.plist: \(metadata.infoPlist.path)")
+        }
+
+        let archive = try Archive(url: installInput, accessMode: .update, pathEncoding: nil)
+        try replaceArchiveEntry(
+            path: "Payload/\(metadata.bundleName)/Info.plist",
+            with: metadata.infoPlist,
+            in: archive
+        )
+        return installInput
+    }
+
+    private func replaceArchiveEntry(path: String, with source: URL, in archive: Archive) throws {
         guard let entry = archive[path] else {
             throw UnfairError.io("archive entry missing: \(path)")
         }
-        guard entry.type != .symlink else {
-            logger.verbose("skipped symlink update: \(path)")
-            return
-        }
-
         let attributes = entry.fileAttributes
         let modificationDate = attributes[.modificationDate] as? Date ?? Date()
         let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value ?? defaultFilePermissions
         let compressionMethod: CompressionMethod = entry.isCompressed ? .deflate : .none
-        let fileSize = try FileSystem.fileSize(record.url)
-
-        let handle = try FileHandle(forReadingFrom: record.url)
+        let fileSize = try FileSystem.fileSize(source)
+        let handle = try FileHandle(forReadingFrom: source)
         defer { try? handle.close() }
         let provider: Provider = { position, size in
             try handle.seek(toOffset: UInt64(position))
@@ -88,6 +157,80 @@ public final class PackageProcessor {
             provider: provider
         )
     }
+
+    private func minimumOSVersionExceedsCurrentDevice(_ value: String) -> Bool {
+        let requested = OperatingSystemVersion(unfairVersionString: value)
+        let current = ProcessInfo.processInfo.operatingSystemVersion
+        return compareOperatingSystemVersions(requested, current) == .orderedDescending
+    }
+
+    private func currentDeviceMinimumOSVersion() -> String {
+        let current = ProcessInfo.processInfo.operatingSystemVersion
+        return "\(current.majorVersion).0"
+    }
+
+    private func compareOperatingSystemVersions(_ left: OperatingSystemVersion, _ right: OperatingSystemVersion) -> ComparisonResult {
+        let leftParts = [left.majorVersion, left.minorVersion, left.patchVersion]
+        let rightParts = [right.majorVersion, right.minorVersion, right.patchVersion]
+        for index in 0..<leftParts.count {
+            if leftParts[index] < rightParts[index] {
+                return .orderedAscending
+            }
+            if leftParts[index] > rightParts[index] {
+                return .orderedDescending
+            }
+        }
+        return .orderedSame
+    }
+
+    private func installIPA(_ input: URL, bundleID: String) throws {
+        let appinst = try existingExecutable([
+            "/var/jb/usr/bin/appinst",
+            "/usr/bin/appinst",
+            "/bin/appinst",
+        ])
+        logger.log("installing: \(bundleID)")
+        let result = try FileSystem.runExecutable(appinst, arguments: [input.path])
+        guard result.status == 0 else {
+            throw UnfairError.io("appinst failed (\(result.status)): \(result.output)")
+        }
+    }
+
+    private func findInstalledApp(_ metadata: AppBundleMetadata) throws -> URL {
+        let children = try FileManager.default.contentsOfDirectory(at: installedAppRoot, includingPropertiesForKeys: [.isDirectoryKey])
+        var matches: [URL] = []
+        for container in children {
+            let app = container.appendingPathComponent(metadata.bundleName, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: app.path) else {
+                continue
+            }
+            guard let installed = try? appBundleMetadata(app), installed.bundleID == metadata.bundleID else {
+                continue
+            }
+            matches.append(app)
+        }
+        guard let match = matches.sorted(by: { $0.path < $1.path }).last else {
+            throw UnfairError.io("installed app not found: \(metadata.bundleID)")
+        }
+        logger.log("installed app: \(match.path)")
+        return match
+    }
+
+    private func cleanupInstalledApp(_ appURL: URL, bundleID: String) {
+        logger.log("cleaning installed app: \(bundleID)")
+        if let uicache = try? existingExecutable(["/var/jb/usr/bin/uicache", "/usr/bin/uicache", "/bin/uicache"]) {
+            _ = try? FileSystem.runExecutable(uicache, arguments: ["-u", appURL.path])
+        }
+        try? FileManager.default.removeItem(at: appURL.deletingLastPathComponent())
+    }
+
+    private func existingExecutable(_ paths: [String]) throws -> String {
+        for path in paths where access(path, X_OK) == 0 {
+            return path
+        }
+        throw UnfairError.io("required executable missing: \(paths.joined(separator: ", "))")
+    }
+    #endif
 
     private func processAppBundle(_ appURL: URL) throws -> [MachORecord] {
         let label = appURL.lastPathComponent
@@ -121,7 +264,7 @@ public final class PackageProcessor {
 
         for record in records {
             let binaryDir = record.url.deletingLastPathComponent()
-            try validateXRootLocation(record.url, label: "binary")
+            try validateDecryptableLocation(record.url, label: "binary")
             logger.verbose("cwd: \(binaryDir.path)")
             FileManager.default.changeCurrentDirectoryPath(binaryDir.path)
             try decryptor.decryptBinary(
@@ -287,6 +430,22 @@ public final class PackageProcessor {
         }
     }
 
+    private func validateDecryptableLocation(_ url: URL, label: String) throws {
+        let paths = [
+            url.standardizedFileURL.path,
+            url.standardizedFileURL.resolvingSymlinksInPath().path,
+        ]
+        #if os(iOS)
+        guard paths.contains(where: isInsideInstalledApplicationRoot) || paths.contains(where: isInsideRequiredXRoot) else {
+            throw UnfairError.io("\(label) must be inside /var/containers/Bundle/Application or /var/folders/bg/<token>/X: \(url.path)")
+        }
+        #else
+        guard paths.contains(where: isInsideRequiredXRoot) else {
+            throw UnfairError.io("\(label) must be inside /var/folders/bg/<token>/X: \(url.path)")
+        }
+        #endif
+    }
+
     private func isInsideRequiredXRoot(_ path: String) -> Bool {
         var components = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
         if components.count > 1, components[1] == "private" {
@@ -302,9 +461,26 @@ public final class PackageProcessor {
             && components[5] == "X"
     }
 
+    private func isInsideInstalledApplicationRoot(_ path: String) -> Bool {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let root = installedAppRoot.standardizedFileURL.path
+        return standardized == root || standardized.hasPrefix(root + "/")
+    }
+
     private func isContained(_ url: URL, in root: URL) -> Bool {
         let path = url.standardizedFileURL.path
         let rootPath = root.standardizedFileURL.path
         return path == rootPath || path.hasPrefix(rootPath + "/")
+    }
+}
+
+private extension OperatingSystemVersion {
+    init(unfairVersionString value: String) {
+        let parts = value.split(separator: ".").map { Int($0) ?? 0 }
+        self.init(
+            majorVersion: parts.indices.contains(0) ? parts[0] : 0,
+            minorVersion: parts.indices.contains(1) ? parts[1] : 0,
+            patchVersion: parts.indices.contains(2) ? parts[2] : 0
+        )
     }
 }

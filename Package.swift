@@ -19,14 +19,23 @@ let package = Package(
         .target(
             name: "UnfairKit",
             dependencies: [
+                "UnfairSupport",
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ]
         ),
+        .target(name: "UnfairSupport"),
         .executableTarget(
             name: "UnfairCLI",
             dependencies: [
                 "UnfairKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ]
+        ),
+        .testTarget(
+            name: "UnfairKitTests",
+            dependencies: [
+                "UnfairKit",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ]
         ),
     ]

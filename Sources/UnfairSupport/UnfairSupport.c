@@ -1,9 +1,14 @@
 #include "UnfairSupport.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <spawn.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -26,6 +31,57 @@ static void set_error(char *error, size_t error_size, const char *format, ...) {
     va_start(args, format);
     vsnprintf(error, error_size, format, args);
     va_end(args);
+}
+
+static void set_allocated_error(char **error_message, const char *format, ...) {
+    if (error_message == NULL) {
+        return;
+    }
+
+    va_list args;
+    va_start(args, format);
+    va_list copy;
+    va_copy(copy, args);
+    int length = vsnprintf(NULL, 0, format, copy);
+    va_end(copy);
+
+    if (length < 0) {
+        va_end(args);
+        *error_message = NULL;
+        return;
+    }
+
+    char *message = malloc((size_t)length + 1);
+    if (message == NULL) {
+        va_end(args);
+        *error_message = NULL;
+        return;
+    }
+
+    vsnprintf(message, (size_t)length + 1, format, args);
+    va_end(args);
+    *error_message = message;
+}
+
+static int append_output(char **output, size_t *length, size_t *capacity, const char *bytes, size_t byte_count) {
+    if (*length + byte_count + 1 > *capacity) {
+        size_t next_capacity = *capacity == 0 ? 4096 : *capacity;
+        while (*length + byte_count + 1 > next_capacity) {
+            next_capacity *= 2;
+        }
+
+        char *next_output = realloc(*output, next_capacity);
+        if (next_output == NULL) {
+            return -1;
+        }
+        *output = next_output;
+        *capacity = next_capacity;
+    }
+
+    memcpy(*output + *length, bytes, byte_count);
+    *length += byte_count;
+    (*output)[*length] = '\0';
+    return 0;
 }
 
 static void *open_libjailbreak(char *error, size_t error_size) {
@@ -113,4 +169,153 @@ int unfair_prepare_app_bundle_decryption(char *error, size_t error_size) {
     (void)error_size;
     return 0;
 #endif
+}
+
+int unfair_run_executable(
+    const char *path,
+    int argument_count,
+    char **arguments,
+    int *exit_status,
+    char **output,
+    char **error_message
+) {
+    if (output != NULL) {
+        *output = NULL;
+    }
+    if (error_message != NULL) {
+        *error_message = NULL;
+    }
+
+    if (path == NULL || exit_status == NULL || output == NULL) {
+        set_allocated_error(error_message, "invalid command execution arguments");
+        return -1;
+    }
+
+    int output_pipe[2] = {-1, -1};
+    if (pipe(output_pipe) != 0) {
+        set_allocated_error(error_message, "pipe failed: %s", strerror(errno));
+        return -1;
+    }
+
+    posix_spawn_file_actions_t actions;
+    int actions_initialized = 0;
+    int result = posix_spawn_file_actions_init(&actions);
+    if (result != 0) {
+        set_allocated_error(error_message, "posix_spawn_file_actions_init failed: %s", strerror(result));
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return -1;
+    }
+    actions_initialized = 1;
+
+    result = posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDOUT_FILENO);
+    if (result == 0) {
+        result = posix_spawn_file_actions_adddup2(&actions, output_pipe[1], STDERR_FILENO);
+    }
+    if (result == 0) {
+        result = posix_spawn_file_actions_addclose(&actions, output_pipe[0]);
+    }
+    if (result == 0) {
+        result = posix_spawn_file_actions_addclose(&actions, output_pipe[1]);
+    }
+    if (result != 0) {
+        set_allocated_error(error_message, "posix_spawn file action setup failed: %s", strerror(result));
+        posix_spawn_file_actions_destroy(&actions);
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return -1;
+    }
+
+    char **spawn_argv = calloc((size_t)argument_count + 2, sizeof(char *));
+    if (spawn_argv == NULL) {
+        set_allocated_error(error_message, "command argument allocation failed");
+        if (actions_initialized) {
+            posix_spawn_file_actions_destroy(&actions);
+        }
+        close(output_pipe[0]);
+        close(output_pipe[1]);
+        return -1;
+    }
+
+    spawn_argv[0] = (char *)path;
+    for (int index = 0; index < argument_count; index++) {
+        spawn_argv[index + 1] = arguments[index];
+    }
+    spawn_argv[argument_count + 1] = NULL;
+
+    pid_t pid = 0;
+    char *empty_environment[] = {NULL};
+    result = posix_spawn(&pid, path, &actions, NULL, spawn_argv, empty_environment);
+    free(spawn_argv);
+    posix_spawn_file_actions_destroy(&actions);
+    close(output_pipe[1]);
+    output_pipe[1] = -1;
+
+    if (result != 0) {
+        set_allocated_error(error_message, "posix_spawn failed: %s", strerror(result));
+        close(output_pipe[0]);
+        return -1;
+    }
+
+    char *command_output = NULL;
+    size_t output_length = 0;
+    size_t output_capacity = 0;
+    if (append_output(&command_output, &output_length, &output_capacity, "", 0) != 0) {
+        set_allocated_error(error_message, "command output allocation failed");
+        close(output_pipe[0]);
+        return -1;
+    }
+
+    char buffer[4096];
+    for (;;) {
+        ssize_t count = read(output_pipe[0], buffer, sizeof(buffer));
+        if (count > 0) {
+            if (append_output(&command_output, &output_length, &output_capacity, buffer, (size_t)count) != 0) {
+                free(command_output);
+                set_allocated_error(error_message, "command output allocation failed");
+                close(output_pipe[0]);
+                return -1;
+            }
+            continue;
+        }
+        if (count == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+
+        free(command_output);
+        set_allocated_error(error_message, "read command output failed: %s", strerror(errno));
+        close(output_pipe[0]);
+        return -1;
+    }
+    close(output_pipe[0]);
+
+    int status = 0;
+    pid_t waited = 0;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+
+    if (waited != pid) {
+        free(command_output);
+        set_allocated_error(error_message, "waitpid failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (WIFEXITED(status)) {
+        *exit_status = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        *exit_status = 128 + WTERMSIG(status);
+    } else {
+        *exit_status = status;
+    }
+
+    *output = command_output;
+    return 0;
+}
+
+void unfair_free(void *pointer) {
+    free(pointer);
 }

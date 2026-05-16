@@ -247,19 +247,11 @@ enum MachOInspector {
     }
 
     private static func displayPath(for url: URL, appURL: URL, label: String) -> String {
-        let roots = [
-            appURL.standardizedFileURL.path,
-            appURL.standardizedFileURL.resolvingSymlinksInPath().path,
-        ]
-        let paths = [
-            url.standardizedFileURL.path,
-            url.standardizedFileURL.resolvingSymlinksInPath().path,
-        ]
-        for root in roots {
-            for path in paths where path == root || path.hasPrefix(root + "/") {
-                return label + String(path.dropFirst(root.count))
-            }
+        let root = appURL.path
+        let path = url.path
+        guard path == root || path.hasPrefix(root + "/") else {
+            return path
         }
-        return url.path
+        return label + String(path.dropFirst(root.count))
     }
 }

@@ -30,44 +30,18 @@ public final class BinaryDecryptor {
     }
 
     public func decryptBinary(at url: URL, rootSinf: URL, displayPath: String? = nil) throws {
-        #if os(iOS)
-        if AppBundleStager.isInsideApplicationBundleRoot(url) == false {
-            try decryptStagedBinary(at: url, rootSinf: rootSinf, displayPath: displayPath)
-            return
-        }
-        #endif
-
-        let temporarySinf = try stageTemporarySinf(for: url, rootSinf: rootSinf)
+        let temporarySinf = try installTemporarySinf(for: url, rootSinf: rootSinf)
         defer { removeTemporarySinf(temporarySinf) }
         let status = try decryptBinaryInPlace(at: url)
         log(status: status, label: displayPath ?? url.path)
     }
 
-    public func decryptBinary(stagedAt stagedURL: URL, outputURL: URL, rootSinf: URL, displayPath: String? = nil) throws {
-        let temporarySinf = try stageTemporarySinf(for: stagedURL, rootSinf: rootSinf)
+    public func decryptBinary(installedAt installedURL: URL, outputURL: URL, rootSinf: URL, displayPath: String? = nil) throws {
+        let temporarySinf = try installTemporarySinf(for: installedURL, rootSinf: rootSinf)
         defer { removeTemporarySinf(temporarySinf) }
-        let status = try decryptBinary(stagedAt: stagedURL, outputURL: outputURL)
+        let status = try decryptBinary(installedAt: installedURL, outputURL: outputURL)
         log(status: status, label: displayPath ?? outputURL.path)
     }
-
-    #if os(iOS)
-    private func decryptStagedBinary(at url: URL, rootSinf: URL, displayPath: String?) throws {
-        let staged = try AppBundleStager.stageBinary(url, rootSinf: rootSinf, logger: logger)
-        defer { AppBundleStager.cleanup(staged.bundle) }
-
-        let previousDirectory = FileManager.default.currentDirectoryPath
-        defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
-
-        logger.verbose("cwd: \(staged.bundle.appURL.path)")
-        FileManager.default.changeCurrentDirectoryPath(staged.bundle.appURL.path)
-        try decryptBinary(
-            stagedAt: URL(fileURLWithPath: staged.binaryURL.lastPathComponent),
-            outputURL: url,
-            rootSinf: staged.rootSinf,
-            displayPath: displayPath ?? url.path
-        )
-    }
-    #endif
 
     private func log(status: DecryptionStatus, label: String) {
         switch status {
@@ -78,7 +52,7 @@ public final class BinaryDecryptor {
         }
     }
 
-    private func stageTemporarySinf(for url: URL, rootSinf: URL) throws -> TemporarySinf? {
+    private func installTemporarySinf(for url: URL, rootSinf: URL) throws -> TemporarySinf? {
         let scInfo = URL(fileURLWithPath: "SC_Info", isDirectory: true)
         try FileSystem.createDirectory(scInfo)
 
@@ -136,16 +110,16 @@ public final class BinaryDecryptor {
         return .decrypted
     }
 
-    private func decryptBinary(stagedAt stagedURL: URL, outputURL: URL) throws -> DecryptionStatus {
-        logger.verbose("staged target: \(stagedURL.path)")
+    private func decryptBinary(installedAt installedURL: URL, outputURL: URL) throws -> DecryptionStatus {
+        logger.verbose("installed target: \(installedURL.path)")
         logger.verbose("output target: \(outputURL.path)")
-        logger.verbose("opening staged binary (read-only)")
+        logger.verbose("opening installed binary (read-only)")
 
-        let stagedFD = open(stagedURL.path, O_RDONLY)
-        guard stagedFD >= 0 else {
-            throw UnfairError.io("open staged failed: \(String(cString: strerror(errno)))")
+        let installedFD = open(installedURL.path, O_RDONLY)
+        guard installedFD >= 0 else {
+            throw UnfairError.io("open installed failed: \(String(cString: strerror(errno)))")
         }
-        defer { close(stagedFD) }
+        defer { close(installedFD) }
 
         logger.verbose("opening output binary (read-write)")
         let outputFD = open(outputURL.path, O_RDWR)
@@ -154,11 +128,11 @@ public final class BinaryDecryptor {
         }
         defer { close(outputFD) }
 
-        let stagedSize = try fileSize(fd: stagedFD, label: "staged")
+        let installedSize = try fileSize(fd: installedFD, label: "installed")
         let mappedOutput = try mapWritableBinary(fd: outputFD)
         defer { munmap(mappedOutput.base, mappedOutput.size) }
-        guard mappedOutput.size == stagedSize else {
-            throw UnfairError.invalidMachO("staged and output binary sizes differ")
+        guard mappedOutput.size == installedSize else {
+            throw UnfairError.invalidMachO("installed and output binary sizes differ")
         }
 
         let output = try inspectMappedBinary(mappedOutput.base, fileSize: mappedOutput.size)
@@ -172,7 +146,7 @@ public final class BinaryDecryptor {
 
         try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
         try unprotectRegion(
-            fd: stagedFD,
+            fd: installedFD,
             fileOffset: output.slice.offset,
             destinationSliceBase: output.sliceBase,
             sliceSize: output.slice.size,

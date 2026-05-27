@@ -13,7 +13,7 @@ public final class BinaryDecryptor {
         var blobSize: Int
     }
 
-    private struct TemporarySinf {
+    struct TemporarySinf {
         var destination: URL
     }
 
@@ -52,7 +52,7 @@ public final class BinaryDecryptor {
         }
     }
 
-    private func installTemporarySinf(for url: URL, rootSinf: URL) throws -> TemporarySinf? {
+    func installTemporarySinf(for url: URL, rootSinf: URL) throws -> TemporarySinf? {
         let scInfo = URL(fileURLWithPath: "SC_Info", isDirectory: true)
         try FileSystem.createDirectory(scInfo)
 
@@ -62,7 +62,7 @@ public final class BinaryDecryptor {
         }
 
         if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
+            return nil
         }
 
         logger.verbose("sinf copy: root sinf -> ./SC_Info/\(url.lastPathComponent).sinf")

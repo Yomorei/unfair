@@ -35,10 +35,10 @@ static void *open_libjailbreak(char *error, size_t error_size) {
     }
 
     const char *paths[] = {
+        "libjailbreak.dylib",
         "/var/jb/usr/lib/libjailbreak.dylib",
         "/var/jb/basebin/libjailbreak.dylib",
         "/basebin/libjailbreak.dylib",
-        "libjailbreak.dylib",
     };
 
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {

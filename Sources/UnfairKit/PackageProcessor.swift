@@ -3,13 +3,16 @@ import ZIPFoundation
 
 public final class PackageProcessor {
     private let logger: UnfairLogger
+    private let decryptionPreparer: BinaryDecryptor.DecryptionPreparer?
     private let encryptedRegionMapper: BinaryDecryptor.EncryptedRegionMapper?
 
     public init(
         logger: UnfairLogger = UnfairLogger(),
+        decryptionPreparer: BinaryDecryptor.DecryptionPreparer? = nil,
         encryptedRegionMapper: BinaryDecryptor.EncryptedRegionMapper? = nil
     ) {
         self.logger = logger
+        self.decryptionPreparer = decryptionPreparer
         self.encryptedRegionMapper = encryptedRegionMapper
     }
 
@@ -94,6 +97,7 @@ public final class PackageProcessor {
         var decryptedOutputRecords: [MachORecord] = []
         let decryptor = BinaryDecryptor(
             logger: logger,
+            decryptionPreparer: decryptionPreparer,
             encryptedRegionMapper: encryptedRegionMapper
         )
         let previousDirectory = FileManager.default.currentDirectoryPath
@@ -159,6 +163,7 @@ public final class PackageProcessor {
     private func decrypt(records: [MachORecord], rootSinf: URL) throws {
         let decryptor = BinaryDecryptor(
             logger: logger,
+            decryptionPreparer: decryptionPreparer,
             encryptedRegionMapper: encryptedRegionMapper
         )
         let previousDirectory = FileManager.default.currentDirectoryPath

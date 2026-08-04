@@ -3,6 +3,20 @@ import Foundation
 import MachO
 
 public final class BinaryDecryptor {
+    public struct DecryptionPreparation {
+        private let finishPreparation: () throws -> Void
+
+        public init(finish: @escaping () throws -> Void = {}) {
+            self.finishPreparation = finish
+        }
+
+        fileprivate func finish() throws {
+            try finishPreparation()
+        }
+    }
+
+    public typealias DecryptionPreparer = () throws -> DecryptionPreparation
+
     public struct EncryptedRegionMapping {
         public let address: UnsafeMutableRawPointer
         private let restoreReadProtection: () throws -> Void
@@ -25,6 +39,7 @@ public final class BinaryDecryptor {
     ) -> EncryptedRegionMapping?
 
     private let logger: UnfairLogger
+    private let prepareDecryption: DecryptionPreparer
     private let mapEncryptedRegion: EncryptedRegionMapper
     private typealias MremapEncrypted = @convention(c) (UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32) -> Int32
     private let addFileSignaturesReturn = Int32(97)
@@ -56,9 +71,14 @@ public final class BinaryDecryptor {
 
     public init(
         logger: UnfairLogger = UnfairLogger(),
+        decryptionPreparer: DecryptionPreparer? = nil,
         encryptedRegionMapper: EncryptedRegionMapper? = nil
     ) {
         self.logger = logger
+        self.prepareDecryption = decryptionPreparer ?? {
+            try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
+            return DecryptionPreparation()
+        }
         self.mapEncryptedRegion = encryptedRegionMapper ?? { address, size, protection, flags, fd, offset in
             guard let mapping = mmap(address, size, protection, flags, fd, offset),
                   mapping != MAP_FAILED
@@ -165,8 +185,9 @@ public final class BinaryDecryptor {
             return .skipped
         }
 
-        try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        try unprotectRegion(fd: fd, fileOffset: output.slice.offset, sliceBase: output.sliceBase, sliceSize: output.slice.size, info: enc)
+        try withPreparedDecryption {
+            try unprotectRegion(fd: fd, fileOffset: output.slice.offset, sliceBase: output.sliceBase, sliceSize: output.slice.size, info: enc)
+        }
         try markDecrypted(sliceBase: output.sliceBase, commandOffset: enc.commandOffset)
 
         guard msync(mapped.base, mapped.size, MS_SYNC) == 0 else {
@@ -210,14 +231,15 @@ public final class BinaryDecryptor {
             return .skipped
         }
 
-        try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        try unprotectRegion(
-            fd: stagedFD,
-            fileOffset: output.slice.offset,
-            destinationSliceBase: output.sliceBase,
-            sliceSize: output.slice.size,
-            info: enc
-        )
+        try withPreparedDecryption {
+            try unprotectRegion(
+                fd: stagedFD,
+                fileOffset: output.slice.offset,
+                destinationSliceBase: output.sliceBase,
+                sliceSize: output.slice.size,
+                info: enc
+            )
+        }
         try markDecrypted(sliceBase: output.sliceBase, commandOffset: enc.commandOffset)
 
         guard msync(mappedOutput.base, mappedOutput.size, MS_SYNC) == 0 else {
@@ -225,6 +247,17 @@ public final class BinaryDecryptor {
         }
         logger.verbose("done - binary decrypted to output")
         return .decrypted
+    }
+
+    private func withPreparedDecryption(_ operation: () throws -> Void) throws {
+        let preparation = try prepareDecryption()
+        do {
+            try operation()
+        } catch {
+            try preparation.finish()
+            throw error
+        }
+        try preparation.finish()
     }
 
     private func fileSize(fd: Int32, label: String) throws -> Int {

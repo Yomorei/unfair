@@ -42,14 +42,7 @@ public final class BinaryDecryptor {
     private let prepareDecryption: DecryptionPreparer
     private let mapEncryptedRegion: EncryptedRegionMapper
     private typealias MremapEncrypted = @convention(c) (UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32) -> Int32
-    private let addFileSignaturesReturn = Int32(97)
     private static let encryptedRegionChunkSize = 16 * 1024 * 1024
-
-    private struct FileSignatures {
-        var fileStart: off_t
-        var blobStart: UnsafeMutableRawPointer?
-        var blobSize: Int
-    }
 
     struct TemporarySinf {
         var destination: URL
@@ -324,8 +317,9 @@ public final class BinaryDecryptor {
         let encryptedOffset = fileOffset + Int(info.cryptoff)
         logger.verbose("decrypting: cryptid=\(info.cryptid)  cryptoff=0x\(String(info.cryptoff, radix: 16))  cryptsize=0x\(String(info.cryptsize, radix: 16))  fileoff=0x\(String(encryptedOffset, radix: 16))")
 
-        try registerCodeSignature(fd: fd, fileOffset: fileOffset, sliceBase: UnsafeRawPointer(destinationSliceBase), sliceSize: sliceSize)
-
+        // Registering an App Store main CodeDirectory here makes PMAP_CS treat it
+        // as a second main binary in the daemon's pmap. The FairPlay pager only
+        // needs the file-backed mapping and SC_Info, and the result is read-only.
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "mremap_encrypted") else {
             throw UnfairError.mremapUnavailable
         }
@@ -420,23 +414,4 @@ public final class BinaryDecryptor {
         Int(sysconf(_SC_PAGESIZE))
     }
 
-    private func registerCodeSignature(fd: Int32, fileOffset: Int, sliceBase: UnsafeRawPointer, sliceSize: Int) throws {
-        guard let codeSignature = try MachOInspector.findCodeSignatureInfo(base: sliceBase, size: sliceSize) else {
-            throw UnfairError.invalidMachO("code signature command missing")
-        }
-
-        var signatures = FileSignatures(
-            fileStart: off_t(fileOffset),
-            blobStart: UnsafeMutableRawPointer(bitPattern: Int(codeSignature.dataoff)),
-            blobSize: Int(codeSignature.datasize)
-        )
-
-        logger.verbose("registering code signature: file_start=0x\(String(fileOffset, radix: 16))  blob=0x\(String(codeSignature.dataoff, radix: 16))  size=0x\(String(codeSignature.datasize, radix: 16))")
-        let result = withUnsafeMutablePointer(to: &signatures) { pointer in
-            fcntl(fd, addFileSignaturesReturn, pointer)
-        }
-        guard result == 0 else {
-            throw UnfairError.io("F_ADDFILESIGS_RETURN failed: \(String(cString: strerror(errno)))")
-        }
-    }
 }

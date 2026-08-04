@@ -14,7 +14,10 @@ struct StagedBinary {
 }
 
 enum AppBundleStager {
-    private static let applicationBundleRoot = URL(fileURLWithPath: "/var/containers/Bundle/Application", isDirectory: true)
+    private static let applicationBundleRoot = URL(
+        fileURLWithPath: "/rootfs/private/var/containers/Bundle/Application",
+        isDirectory: true
+    )
 
     static func isInsideApplicationBundleRoot(_ url: URL) -> Bool {
         let paths = [

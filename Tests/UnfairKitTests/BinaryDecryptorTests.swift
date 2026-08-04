@@ -3,6 +3,34 @@ import Foundation
 import XCTest
 
 final class BinaryDecryptorTests: XCTestCase {
+    func testEncryptedRegionChunksSplitLargePageAlignedRegion() throws {
+        let chunks = try BinaryDecryptor.encryptedRegionChunks(
+            fileOffset: 0x24000,
+            destinationOffset: 0x24000,
+            size: 0x28000,
+            maxChunkSize: 0x10000,
+            pageSize: 0x4000
+        )
+
+        XCTAssertEqual(chunks, [
+            BinaryDecryptor.EncryptedRegionChunk(fileOffset: 0x24000, destinationOffset: 0x24000, size: 0x10000),
+            BinaryDecryptor.EncryptedRegionChunk(fileOffset: 0x34000, destinationOffset: 0x34000, size: 0x10000),
+            BinaryDecryptor.EncryptedRegionChunk(fileOffset: 0x44000, destinationOffset: 0x44000, size: 0x8000),
+        ])
+    }
+
+    func testEncryptedRegionChunksRejectUnalignedRegion() {
+        XCTAssertThrowsError(
+            try BinaryDecryptor.encryptedRegionChunks(
+                fileOffset: 0x24001,
+                destinationOffset: 0x24000,
+                size: 0x10000,
+                maxChunkSize: 0x10000,
+                pageSize: 0x4000
+            )
+        )
+    }
+
     func testInstallTemporarySinfKeepsExistingBinarySinf() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

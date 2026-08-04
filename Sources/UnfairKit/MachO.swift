@@ -57,24 +57,28 @@ enum MachOInspector {
 
         var records: [MachORecord] = []
         for case let url as URL in enumerator {
-            let values = try url.resourceValues(forKeys: Set(keys))
-            guard values.isSymbolicLink != true,
-                  values.isRegularFile == true else {
-                continue
-            }
+            if let record = try autoreleasepool(invoking: { () throws -> MachORecord? in
+                let values = try url.resourceValues(forKeys: Set(keys))
+                guard values.isSymbolicLink != true,
+                      values.isRegularFile == true else {
+                    return nil
+                }
 
-            guard let inspection = try inspect(url: url) else {
-                continue
-            }
+                guard let inspection = try inspect(url: url) else {
+                    return nil
+                }
 
-            let display = displayPath(for: url, appURL: appURL, label: label)
-            records.append(MachORecord(
-                url: url,
-                displayPath: display,
-                name: url.lastPathComponent,
-                hasEncryptionInfo: inspection.hasEncryptionInfo,
-                cryptid: inspection.cryptid
-            ))
+                let display = displayPath(for: url, appURL: appURL, label: label)
+                return MachORecord(
+                    url: url,
+                    displayPath: display,
+                    name: url.lastPathComponent,
+                    hasEncryptionInfo: inspection.hasEncryptionInfo,
+                    cryptid: inspection.cryptid
+                )
+            }) {
+                records.append(record)
+            }
         }
         return records
     }
@@ -247,11 +251,19 @@ enum MachOInspector {
     }
 
     private static func displayPath(for url: URL, appURL: URL, label: String) -> String {
-        let root = appURL.path
-        let path = url.path
-        guard path == root || path.hasPrefix(root + "/") else {
-            return path
+        let roots = [
+            appURL.standardizedFileURL.path,
+            appURL.standardizedFileURL.resolvingSymlinksInPath().path,
+        ]
+        let paths = [
+            url.standardizedFileURL.path,
+            url.standardizedFileURL.resolvingSymlinksInPath().path,
+        ]
+        for root in roots {
+            for path in paths where path == root || path.hasPrefix(root + "/") {
+                return label + String(path.dropFirst(root.count))
+            }
         }
-        return label + String(path.dropFirst(root.count))
+        return url.path
     }
 }

@@ -76,9 +76,24 @@ enum AppBundleStager {
     private static func createBundle(appName: String, logger: UnfairLogger) throws -> StagedAppBundle {
         let container = applicationBundleRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let app = container.appendingPathComponent(appName, isDirectory: true)
-        try FileSystem.createDirectory(app)
+        try createStagingDirectory(container)
+        do {
+            try createStagingDirectory(app)
+        } catch {
+            FileSystem.removeTree(container)
+            throw error
+        }
         logger.log("staged app: \(app.path)")
         return StagedAppBundle(containerURL: container, appURL: app)
+    }
+
+    private static func createStagingDirectory(_ url: URL) throws {
+        guard mkdir(url.path, 0o755) == 0 else {
+            throw UnfairError.io(
+                "mkdir staging directory failed: \(url.path): " +
+                "errno=\(errno) \(String(cString: strerror(errno)))"
+            )
+        }
     }
 
     private static func applyInstalledAppOwnership(to url: URL) throws {

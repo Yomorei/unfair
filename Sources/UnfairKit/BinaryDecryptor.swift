@@ -3,9 +3,26 @@ import Foundation
 import MachO
 
 public final class BinaryDecryptor {
+    public struct EncryptedRegionMapping {
+        public let address: UnsafeMutableRawPointer
+        private let restoreReadProtection: () throws -> Void
+
+        public init(
+            address: UnsafeMutableRawPointer,
+            restoreReadProtection: @escaping () throws -> Void = {}
+        ) {
+            self.address = address
+            self.restoreReadProtection = restoreReadProtection
+        }
+
+        fileprivate func restoreAfterRemap() throws {
+            try restoreReadProtection()
+        }
+    }
+
     public typealias EncryptedRegionMapper = (
         UnsafeMutableRawPointer?, Int, Int32, Int32, Int32, off_t
-    ) -> UnsafeMutableRawPointer?
+    ) -> EncryptedRegionMapping?
 
     private let logger: UnfairLogger
     private let mapEncryptedRegion: EncryptedRegionMapper
@@ -43,7 +60,12 @@ public final class BinaryDecryptor {
     ) {
         self.logger = logger
         self.mapEncryptedRegion = encryptedRegionMapper ?? { address, size, protection, flags, fd, offset in
-            mmap(address, size, protection, flags, fd, offset)
+            guard let mapping = mmap(address, size, protection, flags, fd, offset),
+                  mapping != MAP_FAILED
+            else {
+                return nil
+            }
+            return EncryptedRegionMapping(address: mapping)
         }
     }
 
@@ -335,27 +357,30 @@ public final class BinaryDecryptor {
         cryptid: UInt32,
         mremap: MremapEncrypted
     ) throws {
-        guard let encrypted = mapEncryptedRegion(
+        guard let mapping = mapEncryptedRegion(
             nil,
             chunk.size,
             PROT_READ | PROT_EXEC,
             MAP_PRIVATE,
             fd,
             off_t(chunk.fileOffset)
-        ),
-              encrypted != MAP_FAILED else {
+        ) else {
             throw UnfairError.io("mmap encrypted region failed: \(String(cString: strerror(errno)))")
         }
-        defer { munmap(encrypted, chunk.size) }
+        defer { munmap(mapping.address, chunk.size) }
 
         logger.verbose("calling mremap_encrypted for 0x\(String(chunk.size, radix: 16)) bytes at fileoff=0x\(String(chunk.fileOffset, radix: 16)) (cpu=arm64, sub=all)")
-        let result = mremap(encrypted, chunk.size, cryptid, cpuTypeArm64, cpuSubtypeArm64All)
+        let result = mremap(mapping.address, chunk.size, cryptid, cpuTypeArm64, cpuSubtypeArm64All)
+        let remapErrno = errno
+        // Custom mappers may grant execute permission only for mremap. Restore
+        // read access before this process copies decrypted bytes from the map.
+        try mapping.restoreAfterRemap()
         guard result == 0 else {
-            throw UnfairError.decryptFailed("mremap_encrypted failed: \(String(cString: strerror(errno)))")
+            throw UnfairError.decryptFailed("mremap_encrypted failed: \(String(cString: strerror(remapErrno)))")
         }
 
         logger.verbose("copying 0x\(String(chunk.size, radix: 16)) decrypted bytes back to base at cryptoff=0x\(String(chunk.destinationOffset, radix: 16))")
-        memcpy(destinationSliceBase.advanced(by: chunk.destinationOffset), encrypted, chunk.size)
+        memcpy(destinationSliceBase.advanced(by: chunk.destinationOffset), mapping.address, chunk.size)
     }
 
     private func systemPageSize() -> Int {

@@ -30,6 +30,10 @@ static void set_error(char *error, size_t error_size, const char *format, ...) {
 }
 
 static void *open_libjailbreak(char *error, size_t error_size) {
+    if (dlsym(RTLD_DEFAULT, "jbclient_initialize_primitives") != NULL) {
+        return RTLD_DEFAULT;
+    }
+
     const char *paths[] = {
         "/var/jb/usr/lib/libjailbreak.dylib",
         "/var/jb/basebin/libjailbreak.dylib",

@@ -14,10 +14,9 @@
 #define UNFAIR_CS_PLATFORM_BINARY 0x04000000u
 
 typedef int (*jbclient_initialize_primitives_fn)(void);
-typedef int (*jbclient_root_steal_ucred_fn)(uint64_t, uint64_t *);
-typedef int (*jbclient_root_set_mac_label_fn)(uint64_t, uint64_t, uint64_t *);
 typedef uint64_t (*proc_find_fn)(int);
-typedef void (*proc_csflags_set_fn)(uint64_t, uint32_t);
+typedef int (*proc_rele_fn)(uint64_t);
+typedef int (*proc_csflags_set_fn)(uint64_t, uint32_t);
 
 static void set_error(char *error, size_t error_size, const char *format, ...) {
     if (error == NULL || error_size == 0) {
@@ -76,19 +75,16 @@ int unfair_prepare_app_bundle_decryption(char *error, size_t error_size) {
 
     jbclient_initialize_primitives_fn jbclient_initialize_primitives =
         (jbclient_initialize_primitives_fn)required_symbol(handle, "jbclient_initialize_primitives", error, error_size);
-    jbclient_root_steal_ucred_fn jbclient_root_steal_ucred =
-        (jbclient_root_steal_ucred_fn)required_symbol(handle, "jbclient_root_steal_ucred", error, error_size);
-    jbclient_root_set_mac_label_fn jbclient_root_set_mac_label =
-        (jbclient_root_set_mac_label_fn)required_symbol(handle, "jbclient_root_set_mac_label", error, error_size);
     proc_find_fn proc_find =
         (proc_find_fn)required_symbol(handle, "proc_find", error, error_size);
+    proc_rele_fn proc_rele =
+        (proc_rele_fn)required_symbol(handle, "proc_rele", error, error_size);
     proc_csflags_set_fn proc_csflags_set =
         (proc_csflags_set_fn)required_symbol(handle, "proc_csflags_set", error, error_size);
 
     if (jbclient_initialize_primitives == NULL ||
-        jbclient_root_steal_ucred == NULL ||
-        jbclient_root_set_mac_label == NULL ||
         proc_find == NULL ||
+        proc_rele == NULL ||
         proc_csflags_set == NULL) {
         return -1;
     }
@@ -98,25 +94,18 @@ int unfair_prepare_app_bundle_decryption(char *error, size_t error_size) {
         return -1;
     }
 
-    uint64_t original_ucred = 0;
-    if (jbclient_root_steal_ucred(0, &original_ucred) != 0) {
-        set_error(error, error_size, "jbclient_root_steal_ucred failed");
-        return -1;
-    }
-
-    uint64_t original_label = 0;
-    if (jbclient_root_set_mac_label(1, UINT64_MAX, &original_label) != 0) {
-        set_error(error, error_size, "jbclient_root_set_mac_label failed");
-        return -1;
-    }
-
     uint64_t proc = proc_find(getpid());
     if (proc == 0) {
         set_error(error, error_size, "proc_find(%d) failed", getpid());
         return -1;
     }
 
-    proc_csflags_set(proc, UNFAIR_CS_PLATFORM_BINARY);
+    int status = proc_csflags_set(proc, UNFAIR_CS_PLATFORM_BINARY);
+    proc_rele(proc);
+    if (status != 0) {
+        set_error(error, error_size, "proc_csflags_set failed: %d", status);
+        return -1;
+    }
     prepared = 1;
     return 0;
 #else

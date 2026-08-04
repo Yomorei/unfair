@@ -3,9 +3,14 @@ import ZIPFoundation
 
 public final class PackageProcessor {
     private let logger: UnfairLogger
+    private let encryptedRegionMapper: BinaryDecryptor.EncryptedRegionMapper?
 
-    public init(logger: UnfairLogger = UnfairLogger()) {
+    public init(
+        logger: UnfairLogger = UnfairLogger(),
+        encryptedRegionMapper: BinaryDecryptor.EncryptedRegionMapper? = nil
+    ) {
         self.logger = logger
+        self.encryptedRegionMapper = encryptedRegionMapper
     }
 
     public func process(input: URL, output: URL, workingDirectory providedWorkingDirectory: URL? = nil) throws {
@@ -85,7 +90,10 @@ public final class PackageProcessor {
         let outputRecords = try MachOInspector.scanBinaries(appURL: outputApp, label: label)
         let outputsByDisplayPath = Dictionary(uniqueKeysWithValues: outputRecords.map { ($0.displayPath, $0) })
         var decryptedOutputRecords: [MachORecord] = []
-        let decryptor = BinaryDecryptor(logger: logger)
+        let decryptor = BinaryDecryptor(
+            logger: logger,
+            encryptedRegionMapper: encryptedRegionMapper
+        )
         let previousDirectory = FileManager.default.currentDirectoryPath
         defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
 
@@ -138,7 +146,10 @@ public final class PackageProcessor {
     }
 
     private func decrypt(records: [MachORecord], rootSinf: URL) throws {
-        let decryptor = BinaryDecryptor(logger: logger)
+        let decryptor = BinaryDecryptor(
+            logger: logger,
+            encryptedRegionMapper: encryptedRegionMapper
+        )
         let previousDirectory = FileManager.default.currentDirectoryPath
         defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
 

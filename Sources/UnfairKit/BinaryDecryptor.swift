@@ -3,7 +3,12 @@ import Foundation
 import MachO
 
 public final class BinaryDecryptor {
+    public typealias EncryptedRegionMapper = (
+        UnsafeMutableRawPointer?, Int, Int32, Int32, Int32, off_t
+    ) -> UnsafeMutableRawPointer?
+
     private let logger: UnfairLogger
+    private let mapEncryptedRegion: EncryptedRegionMapper
     private typealias MremapEncrypted = @convention(c) (UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32) -> Int32
     private let addFileSignaturesReturn = Int32(97)
     private static let encryptedRegionChunkSize = 16 * 1024 * 1024
@@ -32,8 +37,14 @@ public final class BinaryDecryptor {
         var size: Int
     }
 
-    public init(logger: UnfairLogger = UnfairLogger()) {
+    public init(
+        logger: UnfairLogger = UnfairLogger(),
+        encryptedRegionMapper: EncryptedRegionMapper? = nil
+    ) {
         self.logger = logger
+        self.mapEncryptedRegion = encryptedRegionMapper ?? { address, size, protection, flags, fd, offset in
+            mmap(address, size, protection, flags, fd, offset)
+        }
     }
 
     public func decryptBinary(at url: URL, rootSinf: URL, displayPath: String? = nil) throws {
@@ -324,7 +335,14 @@ public final class BinaryDecryptor {
         cryptid: UInt32,
         mremap: MremapEncrypted
     ) throws {
-        guard let encrypted = mmap(nil, chunk.size, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, off_t(chunk.fileOffset)),
+        guard let encrypted = mapEncryptedRegion(
+            nil,
+            chunk.size,
+            PROT_READ | PROT_EXEC,
+            MAP_PRIVATE,
+            fd,
+            off_t(chunk.fileOffset)
+        ),
               encrypted != MAP_FAILED else {
             throw UnfairError.io("mmap encrypted region failed: \(String(cString: strerror(errno)))")
         }

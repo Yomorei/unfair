@@ -15,7 +15,7 @@ struct StagedBinary {
 
 enum AppBundleStager {
     private static let applicationBundleRoot = URL(
-        fileURLWithPath: "/rootfs/private/var/containers/Bundle/Application",
+        fileURLWithPath: "/var/containers/Bundle/Application/.unfaird",
         isDirectory: true
     )
 

@@ -185,7 +185,15 @@ public final class PackageProcessor {
                     throw UnfairError.io("archive entry escapes extraction directory: \(entry.path)")
                 }
 
-                _ = try archive.extract(entry, to: entryURL)
+                do {
+                    _ = try archive.extract(entry, to: entryURL)
+                } catch {
+                    let cocoaError = error as NSError
+                    throw UnfairError.io(
+                        "archive extraction failed at \(entry.path): " +
+                        "\(cocoaError.domain) \(cocoaError.code): \(cocoaError.userInfo)"
+                    )
+                }
             })
         }
     }

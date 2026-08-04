@@ -80,7 +80,9 @@ public final class PackageProcessor {
         logger.log("app: \(label)")
 
         let stagedRecords = try MachOInspector.scanBinaries(appURL: stagedApp, label: label)
-        let encryptedStagedRecords = stagedRecords.filter(\.isEncrypted)
+        let encryptedStagedRecords = stagedRecords
+            .filter(\.isEncrypted)
+            .sorted(by: decryptOrder)
         logScan(stagedRecords, encryptedRecords: encryptedStagedRecords)
 
         guard let rootSinf = findRootSinf(appURL: stagedApp, records: stagedRecords) else {
@@ -143,6 +145,15 @@ public final class PackageProcessor {
             logger.verbose("encrypted mach-o: \(record.displayPath)")
         }
         logger.log("encrypted binaries found: \(encryptedRecords.count)")
+    }
+
+    private func decryptOrder(_ lhs: MachORecord, _ rhs: MachORecord) -> Bool {
+        let lhsDepth = lhs.displayPath.split(separator: "/").count
+        let rhsDepth = rhs.displayPath.split(separator: "/").count
+        if lhsDepth != rhsDepth {
+            return lhsDepth < rhsDepth
+        }
+        return lhs.displayPath < rhs.displayPath
     }
 
     private func decrypt(records: [MachORecord], rootSinf: URL) throws {

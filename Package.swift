@@ -13,7 +13,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", .exact("0.9.19")),
-        .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "1.0.0")),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", "1.3.0"..<"2.0.0"),
     ],
     targets: [
         .target(

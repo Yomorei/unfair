@@ -27,13 +27,12 @@ If `/usr/local` is not writable, run `sudo make install`.
 
 ## iOS
 
-iOS support is for jailbroken devices where the target app must be installed
-under `/var/containers/Bundle/Application` before decryption.
+iOS support is for jailbroken devices where the target app can be staged under
+`/var/containers/Bundle/Application` before decryption.
 
 Requirements:
 
 - SSH access as `root`
-- `/var/jb/usr/bin/appinst`
 - `/var/jb/usr/bin/ldid`
 - `/var/jb/usr/lib/libjailbreak.dylib` or `/var/jb/basebin/libjailbreak.dylib`
 
@@ -68,14 +67,15 @@ Copy the result back:
 scp root@ip:/var/tmp/Example.unfair.ipa ./Example.unfair.ipa
 ```
 
-The iOS package flow installs the IPA with `appinst`, locates the installed
-`.app` bundle under `/var/containers/Bundle/Application`, prepares decryption
-permissions through jailbreak primitives, maps encrypted regions with
-`PROT_READ | PROT_EXEC`, writes decrypted bytes back in place, then removes the
-installed app container.
+The iOS package flow copies the extracted `.app` bundle into a temporary UUID
+container under `/var/containers/Bundle/Application`, sets installed-app
+ownership, prepares decryption permissions through jailbreak primitives, maps
+encrypted regions with `PROT_READ`, applies the FairPlay pager with
+`CRYPTID_MODEL_ENCRYPTION`, writes decrypted bytes back into the output payload,
+then removes the staging container.
 
 The output IPA omits `Payload/*.app/SC_Info/**` because those FairPlay support
-files can contain user-specific account data. The installed app copy still uses
+files can contain user-specific account data. The staged app copy still uses
 `SC_Info` during decryption.
 
 Verify the output:

@@ -2,16 +2,53 @@ import Darwin
 import Foundation
 import MachO
 
-public final class BinaryDecryptor {
-    private let logger: UnfairLogger
-    private typealias MremapEncrypted = @convention(c) (UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32) -> Int32
-    private let addFileSignaturesReturn = Int32(97)
+struct EncryptedRegionSystemCalls {
+    typealias Mapper = (
+        UnsafeMutableRawPointer?, Int, Int32, Int32, Int32, off_t
+    ) -> UnsafeMutableRawPointer?
+    typealias Remapper = (
+        UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32
+    ) throws -> Int32
+    typealias Unmapper = (UnsafeMutableRawPointer?, Int) -> Int32
 
-    private struct FileSignatures {
-        var fileStart: off_t
-        var blobStart: UnsafeMutableRawPointer?
-        var blobSize: Int
-    }
+    let map: Mapper
+    let remap: Remapper
+    let unmap: Unmapper
+
+    static let live = EncryptedRegionSystemCalls(
+        map: { address, size, protection, flags, fd, offset in
+            guard let mapping = mmap(address, size, protection, flags, fd, offset),
+                  mapping != MAP_FAILED
+            else {
+                return nil
+            }
+            return mapping
+        },
+        remap: { address, size, cryptid, cpuType, cpuSubtype in
+            typealias MremapEncrypted = @convention(c) (
+                UnsafeMutableRawPointer?, Int, UInt32, UInt32, UInt32
+            ) -> Int32
+
+            guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "mremap_encrypted") else {
+                throw UnfairError.mremapUnavailable
+            }
+            let function = unsafeBitCast(symbol, to: MremapEncrypted.self)
+            return function(address, size, cryptid, cpuType, cpuSubtype)
+        },
+        unmap: { address, size in
+            munmap(address, size)
+        }
+    )
+}
+
+public final class BinaryDecryptor {
+    public typealias DecryptionPreparer = () throws -> Void
+
+    private let logger: UnfairLogger
+    private let prepareDecryption: DecryptionPreparer
+    private let encryptedRegionSystemCalls: EncryptedRegionSystemCalls
+    private static let encryptedRegionChunkSize = 16 * 1024 * 1024
+    private static let modelEncryptionCryptid: UInt32 = 2
 
     struct TemporarySinf {
         var destination: URL
@@ -25,23 +62,74 @@ public final class BinaryDecryptor {
     private let cpuTypeArm64 = UInt32(bitPattern: CPU_TYPE_ARM64)
     private let cpuSubtypeArm64All = UInt32(CPU_SUBTYPE_ARM64_ALL)
 
-    public init(logger: UnfairLogger = UnfairLogger()) {
+    struct EncryptedRegionChunk: Equatable {
+        var fileOffset: Int
+        var destinationOffset: Int
+        var size: Int
+    }
+
+    public init(
+        logger: UnfairLogger = UnfairLogger(),
+        decryptionPreparer: DecryptionPreparer? = nil
+    ) {
         self.logger = logger
+        self.prepareDecryption = decryptionPreparer ?? {
+            try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
+        }
+        self.encryptedRegionSystemCalls = .live
+    }
+
+    init(
+        logger: UnfairLogger = UnfairLogger(),
+        decryptionPreparer: DecryptionPreparer? = nil,
+        encryptedRegionSystemCalls: EncryptedRegionSystemCalls
+    ) {
+        self.logger = logger
+        self.prepareDecryption = decryptionPreparer ?? {
+            try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
+        }
+        self.encryptedRegionSystemCalls = encryptedRegionSystemCalls
     }
 
     public func decryptBinary(at url: URL, rootSinf: URL, displayPath: String? = nil) throws {
+        #if os(iOS)
+        if AppBundleStager.isInsideApplicationBundleRoot(url) == false {
+            try decryptStagedBinary(at: url, rootSinf: rootSinf, displayPath: displayPath)
+            return
+        }
+        #endif
+
         let temporarySinf = try installTemporarySinf(for: url, rootSinf: rootSinf)
         defer { removeTemporarySinf(temporarySinf) }
         let status = try decryptBinaryInPlace(at: url)
         log(status: status, label: displayPath ?? url.path)
     }
 
-    public func decryptBinary(installedAt installedURL: URL, outputURL: URL, rootSinf: URL, displayPath: String? = nil) throws {
-        let temporarySinf = try installTemporarySinf(for: installedURL, rootSinf: rootSinf)
+    public func decryptBinary(stagedAt stagedURL: URL, outputURL: URL, rootSinf: URL, displayPath: String? = nil) throws {
+        let temporarySinf = try installTemporarySinf(for: stagedURL, rootSinf: rootSinf)
         defer { removeTemporarySinf(temporarySinf) }
-        let status = try decryptBinary(installedAt: installedURL, outputURL: outputURL)
+        let status = try decryptBinary(stagedAt: stagedURL, outputURL: outputURL)
         log(status: status, label: displayPath ?? outputURL.path)
     }
+
+    #if os(iOS)
+    private func decryptStagedBinary(at url: URL, rootSinf: URL, displayPath: String?) throws {
+        let staged = try AppBundleStager.stageBinary(url, rootSinf: rootSinf, logger: logger)
+        defer { AppBundleStager.cleanup(staged.bundle) }
+
+        let previousDirectory = FileManager.default.currentDirectoryPath
+        defer { FileManager.default.changeCurrentDirectoryPath(previousDirectory) }
+
+        logger.verbose("cwd: \(staged.bundle.appURL.path)")
+        FileManager.default.changeCurrentDirectoryPath(staged.bundle.appURL.path)
+        try decryptBinary(
+            stagedAt: URL(fileURLWithPath: staged.binaryURL.lastPathComponent),
+            outputURL: url,
+            rootSinf: staged.rootSinf,
+            displayPath: displayPath ?? url.path
+        )
+    }
+    #endif
 
     private func log(status: DecryptionStatus, label: String) {
         switch status {
@@ -99,8 +187,9 @@ public final class BinaryDecryptor {
             return .skipped
         }
 
-        try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        try unprotectRegion(fd: fd, fileOffset: output.slice.offset, sliceBase: output.sliceBase, sliceSize: output.slice.size, info: enc)
+        try withPreparedDecryption {
+            try unprotectRegion(fd: fd, fileOffset: output.slice.offset, sliceBase: output.sliceBase, info: enc)
+        }
         try markDecrypted(sliceBase: output.sliceBase, commandOffset: enc.commandOffset)
 
         guard msync(mapped.base, mapped.size, MS_SYNC) == 0 else {
@@ -110,16 +199,16 @@ public final class BinaryDecryptor {
         return .decrypted
     }
 
-    private func decryptBinary(installedAt installedURL: URL, outputURL: URL) throws -> DecryptionStatus {
-        logger.verbose("installed target: \(installedURL.path)")
+    private func decryptBinary(stagedAt stagedURL: URL, outputURL: URL) throws -> DecryptionStatus {
+        logger.verbose("staged target: \(stagedURL.path)")
         logger.verbose("output target: \(outputURL.path)")
-        logger.verbose("opening installed binary (read-only)")
+        logger.verbose("opening staged binary (read-only)")
 
-        let installedFD = open(installedURL.path, O_RDONLY)
-        guard installedFD >= 0 else {
-            throw UnfairError.io("open installed failed: \(String(cString: strerror(errno)))")
+        let stagedFD = open(stagedURL.path, O_RDONLY)
+        guard stagedFD >= 0 else {
+            throw UnfairError.io("open staged failed: \(String(cString: strerror(errno)))")
         }
-        defer { close(installedFD) }
+        defer { close(stagedFD) }
 
         logger.verbose("opening output binary (read-write)")
         let outputFD = open(outputURL.path, O_RDWR)
@@ -128,11 +217,11 @@ public final class BinaryDecryptor {
         }
         defer { close(outputFD) }
 
-        let installedSize = try fileSize(fd: installedFD, label: "installed")
+        let stagedSize = try fileSize(fd: stagedFD, label: "staged")
         let mappedOutput = try mapWritableBinary(fd: outputFD)
         defer { munmap(mappedOutput.base, mappedOutput.size) }
-        guard mappedOutput.size == installedSize else {
-            throw UnfairError.invalidMachO("installed and output binary sizes differ")
+        guard mappedOutput.size == stagedSize else {
+            throw UnfairError.invalidMachO("staged and output binary sizes differ")
         }
 
         let output = try inspectMappedBinary(mappedOutput.base, fileSize: mappedOutput.size)
@@ -144,14 +233,14 @@ public final class BinaryDecryptor {
             return .skipped
         }
 
-        try UnfairProcessPermissions.prepareForAppBundleDecryption(logger: logger)
-        try unprotectRegion(
-            fd: installedFD,
-            fileOffset: output.slice.offset,
-            destinationSliceBase: output.sliceBase,
-            sliceSize: output.slice.size,
-            info: enc
-        )
+        try withPreparedDecryption {
+            try unprotectRegion(
+                fd: stagedFD,
+                fileOffset: output.slice.offset,
+                destinationSliceBase: output.sliceBase,
+                info: enc
+            )
+        }
         try markDecrypted(sliceBase: output.sliceBase, commandOffset: enc.commandOffset)
 
         guard msync(mappedOutput.base, mappedOutput.size, MS_SYNC) == 0 else {
@@ -159,6 +248,11 @@ public final class BinaryDecryptor {
         }
         logger.verbose("done - binary decrypted to output")
         return .decrypted
+    }
+
+    private func withPreparedDecryption(_ operation: () throws -> Void) throws {
+        try prepareDecryption()
+        try operation()
     }
 
     private func fileSize(fd: Int32, label: String) throws -> Int {
@@ -212,11 +306,11 @@ public final class BinaryDecryptor {
         }
     }
 
-    private func unprotectRegion(fd: Int32, fileOffset: Int, sliceBase: UnsafeMutableRawPointer, sliceSize: Int, info: EncryptionInfo) throws {
-        try unprotectRegion(fd: fd, fileOffset: fileOffset, destinationSliceBase: sliceBase, sliceSize: sliceSize, info: info)
+    private func unprotectRegion(fd: Int32, fileOffset: Int, sliceBase: UnsafeMutableRawPointer, info: EncryptionInfo) throws {
+        try unprotectRegion(fd: fd, fileOffset: fileOffset, destinationSliceBase: sliceBase, info: info)
     }
 
-    private func unprotectRegion(fd: Int32, fileOffset: Int, destinationSliceBase: UnsafeMutableRawPointer, sliceSize: Int, info: EncryptionInfo) throws {
+    private func unprotectRegion(fd: Int32, fileOffset: Int, destinationSliceBase: UnsafeMutableRawPointer, info: EncryptionInfo) throws {
         if info.cryptsize == 0 {
             logger.verbose("encrypted region is empty")
             return
@@ -225,48 +319,92 @@ public final class BinaryDecryptor {
         let encryptedOffset = fileOffset + Int(info.cryptoff)
         logger.verbose("decrypting: cryptid=\(info.cryptid)  cryptoff=0x\(String(info.cryptoff, radix: 16))  cryptsize=0x\(String(info.cryptsize, radix: 16))  fileoff=0x\(String(encryptedOffset, radix: 16))")
 
-        try registerCodeSignature(fd: fd, fileOffset: fileOffset, sliceBase: UnsafeRawPointer(destinationSliceBase), sliceSize: sliceSize)
-
-        let encryptedSize = Int(info.cryptsize)
-        guard let encrypted = mmap(nil, encryptedSize, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, off_t(encryptedOffset)),
-              encrypted != MAP_FAILED else {
-            throw UnfairError.io("mmap encrypted region failed: \(String(cString: strerror(errno)))")
+        let chunks = try Self.encryptedRegionChunks(
+            fileOffset: encryptedOffset,
+            destinationOffset: Int(info.cryptoff),
+            size: Int(info.cryptsize),
+            maxChunkSize: Self.encryptedRegionChunkSize,
+            pageSize: systemPageSize()
+        )
+        if chunks.count > 1 {
+            logger.verbose("decrypting encrypted region in \(chunks.count) chunks")
         }
-        defer { munmap(encrypted, encryptedSize) }
-
-        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "mremap_encrypted") else {
-            throw UnfairError.mremapUnavailable
+        for chunk in chunks {
+            try decryptChunk(
+                fd: fd,
+                chunk: chunk,
+                destinationSliceBase: destinationSliceBase
+            )
         }
-        let mremap = unsafeBitCast(symbol, to: MremapEncrypted.self)
-
-        logger.verbose("calling mremap_encrypted (cpu=arm64, sub=all)")
-        let result = mremap(encrypted, encryptedSize, info.cryptid, cpuTypeArm64, cpuSubtypeArm64All)
-        guard result == 0 else {
-            throw UnfairError.decryptFailed("mremap_encrypted failed: \(String(cString: strerror(errno)))")
-        }
-
-        logger.verbose("copying 0x\(String(info.cryptsize, radix: 16)) decrypted bytes back to base")
-        memcpy(destinationSliceBase.advanced(by: Int(info.cryptoff)), encrypted, encryptedSize)
         logger.verbose("decrypt done")
     }
 
-    private func registerCodeSignature(fd: Int32, fileOffset: Int, sliceBase: UnsafeRawPointer, sliceSize: Int) throws {
-        guard let codeSignature = try MachOInspector.findCodeSignatureInfo(base: sliceBase, size: sliceSize) else {
-            throw UnfairError.invalidMachO("code signature command missing")
+    static func encryptedRegionChunks(
+        fileOffset: Int,
+        destinationOffset: Int,
+        size: Int,
+        maxChunkSize: Int,
+        pageSize: Int
+    ) throws -> [EncryptedRegionChunk] {
+        guard pageSize > 0, maxChunkSize >= pageSize else {
+            throw UnfairError.invalidMachO("invalid decrypt chunk configuration")
+        }
+        guard fileOffset % pageSize == 0, destinationOffset % pageSize == 0, size % pageSize == 0 else {
+            throw UnfairError.invalidMachO("encrypted region must be page aligned")
         }
 
-        var signatures = FileSignatures(
-            fileStart: off_t(fileOffset),
-            blobStart: UnsafeMutableRawPointer(bitPattern: Int(codeSignature.dataoff)),
-            blobSize: Int(codeSignature.datasize)
-        )
-
-        logger.verbose("registering code signature: file_start=0x\(String(fileOffset, radix: 16))  blob=0x\(String(codeSignature.dataoff, radix: 16))  size=0x\(String(codeSignature.datasize, radix: 16))")
-        let result = withUnsafeMutablePointer(to: &signatures) { pointer in
-            fcntl(fd, addFileSignaturesReturn, pointer)
+        let chunkSize = (maxChunkSize / pageSize) * pageSize
+        var chunks: [EncryptedRegionChunk] = []
+        var processed = 0
+        while processed < size {
+            let remaining = size - processed
+            let currentSize = min(chunkSize, remaining)
+            chunks.append(EncryptedRegionChunk(
+                fileOffset: fileOffset + processed,
+                destinationOffset: destinationOffset + processed,
+                size: currentSize
+            ))
+            processed += currentSize
         }
-        guard result == 0 else {
-            throw UnfairError.io("F_ADDFILESIGS_RETURN failed: \(String(cString: strerror(errno)))")
-        }
+        return chunks
     }
+
+    func decryptChunk(
+        fd: Int32,
+        chunk: EncryptedRegionChunk,
+        destinationSliceBase: UnsafeMutableRawPointer
+    ) throws {
+        guard let mapping = encryptedRegionSystemCalls.map(
+            nil,
+            chunk.size,
+            PROT_READ,
+            MAP_PRIVATE,
+            fd,
+            off_t(chunk.fileOffset)
+        ) else {
+            throw UnfairError.io("mmap encrypted region failed: \(String(cString: strerror(errno)))")
+        }
+        defer { _ = encryptedRegionSystemCalls.unmap(mapping, chunk.size) }
+
+        logger.verbose("calling mremap_encrypted for 0x\(String(chunk.size, radix: 16)) bytes at fileoff=0x\(String(chunk.fileOffset, radix: 16)) (cryptid=model, cpu=arm64, sub=all)")
+        let result = try encryptedRegionSystemCalls.remap(
+            mapping,
+            chunk.size,
+            Self.modelEncryptionCryptid,
+            cpuTypeArm64,
+            cpuSubtypeArm64All
+        )
+        let remapErrno = errno
+        guard result == 0 else {
+            throw UnfairError.decryptFailed("mremap_encrypted failed: \(String(cString: strerror(remapErrno)))")
+        }
+
+        logger.verbose("copying 0x\(String(chunk.size, radix: 16)) decrypted bytes back to base at cryptoff=0x\(String(chunk.destinationOffset, radix: 16))")
+        memcpy(destinationSliceBase.advanced(by: chunk.destinationOffset), mapping, chunk.size)
+    }
+
+    private func systemPageSize() -> Int {
+        Int(sysconf(_SC_PAGESIZE))
+    }
+
 }

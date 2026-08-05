@@ -78,13 +78,22 @@ enum MachOInspector {
     }
 
     static func inspect(url: URL) throws -> MachOInspection? {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw UnfairError.io("open failed: \(url.path): \(String(cString: strerror(errno)))")
+        }
+        defer { close(fd) }
+
+        var magic: UInt32 = 0
+        let magicRead = pread(fd, &magic, MemoryLayout<UInt32>.size, 0)
+        guard magicRead == MemoryLayout<UInt32>.size,
+              magic == fatCigam || magic == mhMagic64 else {
+            return nil
+        }
+
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         return data.withUnsafeBytes { rawBuffer in
             guard let base = rawBuffer.baseAddress, rawBuffer.count >= MemoryLayout<UInt32>.size else {
-                return nil
-            }
-            let magic = base.load(as: UInt32.self)
-            guard magic == fatCigam || magic == mhMagic64 else {
                 return nil
             }
             guard let slice = try? selectArm64Slice(base: base, size: rawBuffer.count, logger: nil) else {

@@ -97,7 +97,7 @@ public final class PackageProcessor {
             }
             let binaryDir = stagedRecord.url.deletingLastPathComponent()
             try validateDecryptableLocation(stagedRecord.url, label: "staged binary")
-            try validateDecryptableLocation(outputRecord.url, label: "output binary")
+            logger.verbose("cwd: \(binaryDir.path)")
             logger.verbose("cwd: \(binaryDir.path)")
             FileManager.default.changeCurrentDirectoryPath(binaryDir.path)
             try decryptor.decryptBinary(

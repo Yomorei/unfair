@@ -1,0 +1,43 @@
+### this shit boutta be hams and rice with a side of pilot on a stick, no kizzy bih dough. 
+name: Build iOS unfair
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ios:
+    runs-on: macos-26
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid-procursus
+
+      - name: Show toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          ldid -h 2>&1 || true
+
+      - name: Build arm64 iOS unfair
+        run: |
+          set -euo pipefail
+          chmod +x build-iOS.sh
+          ./build-iOS.sh
+
+          echo "=== Binary ==="
+          file unfair
+          ls -lh unfair
+
+      - name: Upload iOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: unfair-ios-arm64
+          path: |
+            unfair
+            global.xml
+          if-no-files-found: error
+          retention-days: 7

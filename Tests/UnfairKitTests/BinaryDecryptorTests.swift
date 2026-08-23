@@ -131,7 +131,9 @@ final class BinaryDecryptorTests: XCTestCase {
                 destinationOffset: destinationOffset,
                 size: size
             ),
-            destinationSliceBase: destination
+            destinationSliceBase: destination,
+            cpuType: UInt32(bitPattern: CPU_TYPE_ARM64),
+            cpuSubtype: UInt32(CPU_SUBTYPE_ARM64_ALL)
         )
 
         XCTAssertEqual(events, [
@@ -185,7 +187,9 @@ final class BinaryDecryptorTests: XCTestCase {
                     destinationOffset: 0,
                     size: size
                 ),
-                destinationSliceBase: destination
+                destinationSliceBase: destination,
+                cpuType: UInt32(bitPattern: CPU_TYPE_ARM64),
+                cpuSubtype: UInt32(CPU_SUBTYPE_ARM64_ALL)
             )
         ) { error in
             guard case UnfairError.decryptFailed(let message) = error else {

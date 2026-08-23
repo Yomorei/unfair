@@ -59,9 +59,6 @@ public final class BinaryDecryptor {
         case skipped
     }
 
-    private let cpuTypeArm64 = UInt32(bitPattern: CPU_TYPE_ARM64)
-    private let cpuSubtypeArm64All = UInt32(CPU_SUBTYPE_ARM64_ALL)
-
     struct EncryptedRegionChunk: Equatable {
         var fileOffset: Int
         var destinationOffset: Int
@@ -279,15 +276,23 @@ public final class BinaryDecryptor {
 
     private func inspectMappedBinary(_ mapped: UnsafeMutableRawPointer, fileSize: Int) throws -> (slice: MachOSlice, sliceBase: UnsafeMutableRawPointer, encryptionInfo: EncryptionInfo?) {
         let rawBase = UnsafeRawPointer(mapped)
-        let slice = try MachOInspector.selectArm64Slice(base: rawBase, size: fileSize, logger: logger)
+        let slice = try MachOInspector.selectSupportedSlice(base: rawBase, size: fileSize, logger: logger)
         let sliceBase = mapped.advanced(by: slice.offset)
         let sliceRawBase = UnsafeRawPointer(sliceBase)
+        let magic = sliceRawBase.load(as: UInt32.self)
 
-        let header = sliceRawBase.load(as: mach_header_64.self)
-        logger.verbose("mach-o header: magic=0x\(String(header.magic, radix: 16))  ncmds=\(header.ncmds)  sizeofcmds=0x\(String(header.sizeofcmds, radix: 16))")
+        if magic == UInt32(MH_MAGIC_64) {
+            let header = sliceRawBase.load(as: mach_header_64.self)
+            logger.verbose("mach-o header: magic=0x\(String(header.magic, radix: 16))  ncmds=\(header.ncmds)  sizeofcmds=0x\(String(header.sizeofcmds, radix: 16))")
+        } else if magic == UInt32(MH_MAGIC) {
+            let header = sliceRawBase.load(as: mach_header.self)
+            logger.verbose("mach-o header: magic=0x\(String(header.magic, radix: 16))  ncmds=\(header.ncmds)  sizeofcmds=0x\(String(header.sizeofcmds, radix: 16))")
+        } else {
+            throw UnfairError.invalidMachO("unsupported Mach-O slice")
+        }
 
         guard let enc = try MachOInspector.findEncryptionInfo(base: sliceRawBase, size: slice.size) else {
-            logger.verbose("warning: lc_encryption_info_64 not found")
+            logger.verbose("warning: lc_encryption_info not found")
             return (slice, sliceBase, nil)
         }
         logger.verbose("encryption info command: cmd_offset=0x\(String(enc.commandOffset, radix: 16))")
@@ -299,7 +304,7 @@ public final class BinaryDecryptor {
     }
 
     private func markDecrypted(sliceBase: UnsafeMutableRawPointer, commandOffset: Int) throws {
-        let infoPointer = sliceBase.advanced(by: commandOffset).assumingMemoryBound(to: encryption_info_command_64.self)
+        let infoPointer = sliceBase.advanced(by: commandOffset).assumingMemoryBound(to: encryption_info_command.self)
         if infoPointer.pointee.cryptid != 0 {
             infoPointer.pointee.cryptid = 0
             logger.verbose("cryptid set to 0")
@@ -333,7 +338,9 @@ public final class BinaryDecryptor {
             try decryptChunk(
                 fd: fd,
                 chunk: chunk,
-                destinationSliceBase: destinationSliceBase
+                destinationSliceBase: destinationSliceBase,
+                cpuType: info.cpuType,
+                cpuSubtype: info.cpuSubtype
             )
         }
         logger.verbose("decrypt done")
@@ -372,7 +379,9 @@ public final class BinaryDecryptor {
     func decryptChunk(
         fd: Int32,
         chunk: EncryptedRegionChunk,
-        destinationSliceBase: UnsafeMutableRawPointer
+        destinationSliceBase: UnsafeMutableRawPointer,
+        cpuType: UInt32,
+        cpuSubtype: UInt32
     ) throws {
         guard let mapping = encryptedRegionSystemCalls.map(
             nil,
@@ -386,13 +395,13 @@ public final class BinaryDecryptor {
         }
         defer { _ = encryptedRegionSystemCalls.unmap(mapping, chunk.size) }
 
-        logger.verbose("calling mremap_encrypted for 0x\(String(chunk.size, radix: 16)) bytes at fileoff=0x\(String(chunk.fileOffset, radix: 16)) (cryptid=model, cpu=arm64, sub=all)")
+        logger.verbose("calling mremap_encrypted for 0x\(String(chunk.size, radix: 16)) bytes at fileoff=0x\(String(chunk.fileOffset, radix: 16)) (cryptid=model, cpu=0x\(String(cpuType, radix: 16)), sub=0x\(String(cpuSubtype, radix: 16)))")
         let result = try encryptedRegionSystemCalls.remap(
             mapping,
             chunk.size,
             Self.modelEncryptionCryptid,
-            cpuTypeArm64,
-            cpuSubtypeArm64All
+            cpuType,
+            cpuSubtype
         )
         let remapErrno = errno
         guard result == 0 else {
